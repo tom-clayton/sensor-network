@@ -1,0 +1,6 @@
+{
+  "ssid": "motorola",
+  "password": "pwordpword",
+  "mqtt_server": "broker.mqttdashboard.com",
+  "location": "location1"
+}
