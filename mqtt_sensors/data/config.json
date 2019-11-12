@@ -1,0 +1,6 @@
+{
+  "ssid": "********",
+  "password": "********",
+  "mqtt_server": "broker.mqttdashboard.com",
+  "location": "front room"
+}
