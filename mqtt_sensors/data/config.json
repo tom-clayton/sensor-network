@@ -1,6 +1,7 @@
 {
-  "ssid": "********",
-  "password": "********",
-  "mqtt_server": "broker.mqttdashboard.com",
-  "location": "front room"
+  "ssid": "motorola",
+  "password": "pwordpword",
+  "mqtt server": "192.168.43.130",
+  "location": "location1",
+  "poll period": 60
 }
