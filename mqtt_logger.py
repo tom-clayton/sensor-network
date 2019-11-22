@@ -5,7 +5,8 @@ import datetime
 import time
 import queue
 
-broker_address = "localhost"
+#broker_address = "localhost"
+broker_address = "test.mosquitto.org"
 sensor_timeout = 60 # in seconds
 max_retries = 3
 

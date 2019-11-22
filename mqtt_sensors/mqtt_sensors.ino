@@ -116,10 +116,20 @@ void connect_to_mqtt() {
   }
 }
 
+float get_dew_point(float temperature, float humidity)
+{
+  // Calculate the intermediate value 'gamma'
+  float gamma = log(humidity / 100) + 17.62f * temperature / (243.5f + temperature);
+  // Calculate dew point in Celsius
+  float dew_point = 243.5f * gamma / (17.62f - gamma);
+
+  return dew_point;
+}
+
 void aquire_data(){
   int temperature = (int)SHT2x.GetTemperature();
   int humidity = (int)SHT2x.GetHumidity();
-  int dew_point = (int)SHT2x.GetDewPoint();
+  int dew_point = (int)get_dew_point(temperature, humidity);
   sprintf (message, "%d: %d, %d, %d", message_id++, temperature, humidity, dew_point);
   acknowledged = false;
   poll_timer = millis();
@@ -205,7 +215,3 @@ void loop() {
   ArduinoOTA.handle();
   delay(5000);
 }
-
-
-
-
