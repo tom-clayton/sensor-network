@@ -7,8 +7,6 @@
 #include <Wire.h>
 #include <ArduinoJson.h>
 
-#define ACK_DELAY 5000 // time to wait for acknowledgement before re-sending data in mS
-
 char ssid[16];
 char password[16];
 char mqtt_server[32];
@@ -16,6 +14,7 @@ char location[16];
 char in_topic[32];
 char out_topic[32];
 unsigned long poll_period;
+unsigned long ack_timeout;
 
 bool acknowledged = true;
 
@@ -44,7 +43,7 @@ void on_ota_start() {
 int load_config() {
 
   File file;
-  const size_t capacity = JSON_OBJECT_SIZE(5) + 150;
+  const size_t capacity = JSON_OBJECT_SIZE(6) + 150;
   DynamicJsonDocument doc(capacity);
 
   if(!SPIFFS.begin()){
@@ -66,6 +65,8 @@ int load_config() {
 
   long poll_period_sec = doc["poll period"];
   poll_period = poll_period_sec * 1000;
+
+  ack_timeout = doc["ack timeout"]; 
   
   sprintf(in_topic, "%s/input", location);
   sprintf(out_topic, "%s/output", location);
@@ -125,19 +126,20 @@ void aquire_data(){
 }
 
 void send_message(){
-  Serial.print("sending: ");
-  Serial.println(message);
   client.publish(out_topic, message);
+  Serial.print("Message sent [");
+  Serial.print(out_topic);
+  Serial.print("]: ");
+  Serial.println(message);
   ack_timer = millis();
 }
 
 void callback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("Message arrived [");
+  Serial.print("Message received [");
   Serial.print(topic);
-  Serial.print("] ");
+  Serial.print("]: ");
   String message("");
   for (int i = 0; i < length; i++) {
-    Serial.print((char)payload[i]);
     message += (char)payload[i];
   }
   Serial.println(message);
@@ -194,14 +196,14 @@ void loop() {
     send_message();
   }
 
-  // re-send data every ACK_DELAY mS until acknowledgement:
-  else if (!acknowledged && ((unsigned long)(millis() - ack_timer) >= ACK_DELAY)){
+  // re-send data every ack_timeout mS until acknowledgement:
+  else if (!acknowledged && ((unsigned long)(millis() - ack_timer) >= ack_timeout)){
     send_message();
   }
   
   client.loop();
   ArduinoOTA.handle();
-  delay(1000);
+  delay(5000);
 }
 
 
