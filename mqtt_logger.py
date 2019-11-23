@@ -6,11 +6,11 @@ import time
 import queue
 
 #broker_address = "localhost"
-broker_address = "test.mosquitto.org"
+broker_address = "broker.mqttdashboard.com"
 sensor_timeout = 60 # in seconds
 max_retries = 3
 
-sensor_locations = ("location1",) 
+sensor_locations = ("frontroom",) 
 data_queue = queue.Queue(10)
 
 class Sensor:
