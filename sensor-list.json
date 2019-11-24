@@ -1,0 +1,14 @@
+[
+  {
+    "location": "backroom",
+    "IPaddress": "192.168.0.23",
+    "uC": "esp8266-14e2ac",
+    "index": 1
+  },
+  {
+    "location": "backbenroom",
+    "IPaddress": "192.168.0.24",
+    "uC": "esp8266-16a85f",
+    "index": 2
+  }
+]

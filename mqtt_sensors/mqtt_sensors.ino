@@ -7,12 +7,22 @@
 #include <Wire.h>
 #include <ArduinoJson.h>
 
+struct Data{
+  int temperature,
+      humidity,
+      dew_point;
+};
+
+enum MessageType{
+  SCHEDULED,
+  RETRY,
+  ON_DEMAND
+};
+
 char ssid[16];
 char password[16];
 char mqtt_server[32];
 char location[16];
-char in_topic[32];
-char out_topic[32];
 unsigned long poll_period;
 unsigned long ack_timeout;
 
@@ -21,7 +31,7 @@ bool acknowledged = true;
 unsigned long poll_timer = 0;
 unsigned long ack_timer; 
 
-char message[32];
+char last_message[32];
 int message_id = 0;
 
 WiFiClient espClient;
@@ -68,9 +78,6 @@ int load_config() {
 
   ack_timeout = doc["ack timeout"]; 
   
-  sprintf(in_topic, "%s/input", location);
-  sprintf(out_topic, "%s/output", location);
-   
   file.close();
   
   Serial.println();
@@ -79,9 +86,8 @@ int load_config() {
   //Serial.println(password);
   //Serial.println(mqtt_server);
   
-  //Serial.println(location);
-  //Serial.println(in_topic);
-  //Serial.println(out_topic);
+  Serial.print("Sensor location: ");
+  Serial.println(location);
   //Serial.println(poll_period_sec);
   //Serial.println(poll_period);
   return 1;
@@ -102,10 +108,9 @@ void connect_to_mqtt() {
   // Attempt to connect
   if (client.connect(location)) {
     Serial.println("connected");
-    // Once connected, publish an announcement...
-    client.publish(out_topic, "Ready");
-    // ... and resubscribe
-    client.subscribe(in_topic);
+    char topic[32];
+    sprintf(topic, "%s/input", location);
+    client.subscribe(topic);
   } else {
     Serial.print("failed, rc=");
     Serial.print(client.state());
@@ -116,25 +121,54 @@ void connect_to_mqtt() {
   }
 }
 
-void aquire_data(){
-  int temperature = (int)SHT2x.GetTemperature();
-  int humidity = (int)SHT2x.GetHumidity();
-  int dew_point = (int)SHT2x.GetDewPoint();
-  sprintf (message, "%d: %d, %d, %d", message_id++, temperature, humidity, dew_point);
-  acknowledged = false;
-  poll_timer = millis();
+Data aquire_data()
+{
+  Data output = {
+    (int)SHT2x.GetTemperature(),
+    (int)SHT2x.GetHumidity(),
+    (int)SHT2x.GetDewPoint(),
+  };
+  return output;
 }
 
-void send_message(){
-  client.publish(out_topic, message);
+void send_message(MessageType type, Data data){
+  char topic[32];
+  char message[32];
+  switch (type){
+    case SCHEDULED:{
+      sprintf (message, "%d: %d, %d, %d", message_id++, 
+                                          data.temperature, 
+                                          data.humidity, 
+                                          data.dew_point);
+      sprintf (topic, "%s/scheduled", location);
+      strcpy(last_message, message);
+      acknowledged = false;
+      poll_timer = ack_timer = millis();
+      break;
+    }
+    case RETRY:{
+      sprintf (topic, "%s/scheduled", location);
+      strcpy(message, last_message);
+      ack_timer = millis();
+      break;
+    }
+    case ON_DEMAND:{
+      sprintf (message, "%d, %d, %d", data.temperature, 
+                                      data.humidity, 
+                                      data.dew_point);
+      sprintf (topic, "%s/ondemand", location);
+      break;
+    }
+  }
+  client.publish(topic, message);
   Serial.print("Message sent [");
-  Serial.print(out_topic);
+  Serial.print(topic);
   Serial.print("]: ");
   Serial.println(message);
-  ack_timer = millis();
 }
 
-void callback(char* topic, byte* payload, unsigned int length) {
+void callback(char* topic, byte* payload, unsigned int length) 
+{
   Serial.print("Message received [");
   Serial.print(topic);
   Serial.print("]: ");
@@ -145,16 +179,20 @@ void callback(char* topic, byte* payload, unsigned int length) {
   Serial.println(message);
   
   if (message == "reset"){
-    aquire_data();
-    send_message();
+    Data data = aquire_data();
+    send_message(SCHEDULED, data);
   }
   else if (message == "ack"){
     acknowledged = true; 
   }
+  else if (message == "poll"){
+    Data data = aquire_data();
+    send_message(ON_DEMAND, data); 
+  }
 }
 
-void setup() {
-
+void setup() 
+{
   Serial.begin(115200);
   Wire.begin();
   
@@ -185,20 +223,22 @@ void setup() {
   client.setCallback(callback);
 }
 
-void loop() {
+void loop() 
+{
   if (!client.connected()) {
     connect_to_mqtt(); 
   }
 
   // send data every poll_period mS: 
   if ((unsigned long)(millis() - poll_timer) >= poll_period){
-    aquire_data();
-    send_message();
+    Data data = aquire_data();
+    send_message(SCHEDULED, data);
   }
 
   // re-send data every ack_timeout mS until acknowledgement:
   else if (!acknowledged && ((unsigned long)(millis() - ack_timer) >= ack_timeout)){
-    send_message();
+    Data data;
+    send_message(RETRY, data);
   }
   
   client.loop();

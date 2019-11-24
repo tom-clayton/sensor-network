@@ -7,10 +7,10 @@ import queue
 
 #broker_address = "localhost"
 broker_address = "broker.mqttdashboard.com"
-sensor_timeout = 60 # in seconds
-max_retries = 3
 
-sensor_locations = ("frontroom",) 
+sensor_locations = ("frontroom", "backroom", "backbedroom") 
+sensor_timeout = 120 # in seconds
+
 data_queue = queue.Queue(10)
 
 class Sensor:
@@ -23,8 +23,8 @@ class Sensor:
         self.retries = 0
 
     def subscribe(self):
-        self.client.subscribe(f"{self.location}/output")
-        print(f"Subscribing: {self.location}/output")    
+        self.client.subscribe(f"{self.location}/scheduled")
+        print(f"Subscribing: {self.location}/scheduled")    
 
     def receive(self, message):
         message_id, payload = message.split(':')
@@ -45,21 +45,21 @@ class Sensor:
         self.publish("ack")
 	
     def reset(self):
-        if self.retries < max_retries:
-            self.publish("reset")
-            self.retries += 1
-        else:
-            self.last_message = ",,"
-            self.retries = 0
-            data_queue.put(self)
-            # log sensor failure
+        self.publish("reset")
+        print(f"resetting {self}")
+
+    def no_data(self):
+        self.last_message = ", , "
+        data_queue.put(self)
+        print(f"No data from {self}")
+        # log sensor failure
 
     def __str__(self):
         return self.location
     
 
 def write_to_file(sensors):
-    print ("All sensor data received, writing to disk")
+    print ("Writing to disk")
     sensors.sort(key=lambda x: x.index)
     with open("results", "a") as fo:
         fo.write(datetime.datetime.now()\
@@ -90,13 +90,13 @@ if __name__ == '__main__':
     client.on_message = on_message
     client.user_data_set(sensors)
     client.connect(broker_address, 1883, 60)
-
+    
     # syncronise sensors:
     for sensor in sensors:
         sensor.reset()
         
     data_received = []
-
+    
     while True:
         try:
             sensor = data_queue.get(block=False)
@@ -106,8 +106,7 @@ if __name__ == '__main__':
             if len(data_received) == len(sensor_locations):
                 write_to_file(data_received)
                 data_received = []
-            else:
-                # start/re-start the timeout timer
+            elif len(data_received) == 1:
                 timeout_timer = time.time()
 
         except queue.Empty:
@@ -115,7 +114,9 @@ if __name__ == '__main__':
             (time.time() - timeout_timer) >= sensor_timeout:
                 absent_sensors = [s for s in sensors if s not in data_received]
                 for sensor in absent_sensors:
-                    sensor.reset()
-
+                    sensor.no_data()
+                    
+        # check for midnight and reset sensors
+        
         client.loop()
 
