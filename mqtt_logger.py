@@ -33,7 +33,6 @@ class Sensor:
         self.last_message = payload.strip()
         self.last_message_id = message_id
         data_queue.put(self)
-        self.retries = 0
 
     def publish(self, message):
         client.publish(f"{self.location}/input", 

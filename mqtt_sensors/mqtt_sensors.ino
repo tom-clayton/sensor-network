@@ -85,9 +85,7 @@ int load_config() {
   //Serial.println(ssid);
   //Serial.println(password);
   //Serial.println(mqtt_server);
-  
-  Serial.print("Sensor location: ");
-  Serial.println(location);
+
   //Serial.println(poll_period_sec);
   //Serial.println(poll_period);
   return 1;
@@ -203,6 +201,10 @@ void setup()
       delay(1000);
     }
   }
+  Serial.println(""); 
+  Serial.print("Sensor location: ");
+  Serial.println(location);
+  
   connect_to_wifi();
   Serial.print("Connected to ");
   Serial.println(ssid);

@@ -6,9 +6,15 @@
     "index": 1
   },
   {
-    "location": "backbenroom",
+    "location": "backbedroom",
     "IPaddress": "192.168.0.24",
     "uC": "esp8266-16a85f",
     "index": 2
+  },
+  {
+    "location": "utilityroom",
+    "IPaddress": "192.168.0.25",
+    "uC": "esp8266-775c5e",
+    "index": 3
   }
 ]
