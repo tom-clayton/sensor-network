@@ -8,7 +8,7 @@ import queue
 #broker_address = "localhost"
 broker_address = "broker.mqttdashboard.com"
 
-sensor_locations = ("frontroom", "backroom", "backbedroom") 
+sensor_locations = ("frontroom", "backroom", "backbedroom", "utilityroom") 
 sensor_timeout = 120 # in seconds
 
 data_queue = queue.Queue(10)
@@ -95,6 +95,8 @@ if __name__ == '__main__':
         sensor.reset()
         
     data_received = []
+    old_hour = datetime.datetime.now().hour
+    client.loop_start()
     
     while True:
         try:
@@ -114,8 +116,12 @@ if __name__ == '__main__':
                 absent_sensors = [s for s in sensors if s not in data_received]
                 for sensor in absent_sensors:
                     sensor.no_data()
-                    
-        # check for midnight and reset sensors
-        
-        client.loop()
+
+        new_hour = datetime.datetime.now().hour
+        if new_hour != old_hour:
+            if new_hour == 0:
+                for sensor in sensors:
+                    sensor.reset()
+            old_hour = new_hour
+    
 

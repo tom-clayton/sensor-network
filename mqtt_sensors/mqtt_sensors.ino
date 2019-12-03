@@ -25,6 +25,7 @@ char mqtt_server[32];
 char location[16];
 unsigned long poll_period;
 unsigned long ack_timeout;
+bool demand_only;
 
 bool acknowledged = true;
 
@@ -74,8 +75,14 @@ int load_config() {
   strcpy(location, doc["location"]);
 
   long poll_period_sec = doc["poll period"];
-  poll_period = poll_period_sec * 1000;
-
+  if (poll_period_sec){
+    poll_period = poll_period_sec * 1000;
+    demand_only = false;
+  }
+  else{
+    demand_only = true;
+  }
+  
   ack_timeout = doc["ack timeout"]; 
   
   file.close();
@@ -176,7 +183,7 @@ void callback(char* topic, byte* payload, unsigned int length)
   }
   Serial.println(message);
   
-  if (message == "reset"){
+  if (message == "reset" && !demand_only){
     Data data = aquire_data();
     send_message(SCHEDULED, data);
   }
@@ -232,7 +239,7 @@ void loop()
   }
 
   // send data every poll_period mS: 
-  if ((unsigned long)(millis() - poll_timer) >= poll_period){
+  if (!demand_only && (unsigned long)(millis() - poll_timer) >= poll_period){
     Data data = aquire_data();
     send_message(SCHEDULED, data);
   }
