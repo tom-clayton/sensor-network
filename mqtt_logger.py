@@ -21,6 +21,7 @@ class Sensor:
         self.last_message = None
         self.index = index
         self.retries = 0
+        self.active = False
 
     def subscribe(self):
         self.client.subscribe(f"{self.location}/scheduled")
@@ -33,6 +34,7 @@ class Sensor:
         self.last_message = payload.strip()
         self.last_message_id = message_id
         data_queue.put(self)
+        self.active = True
 
     def publish(self, message):
         client.publish(f"{self.location}/input", 
@@ -109,14 +111,19 @@ if __name__ == '__main__':
                 data_received = []
             elif len(data_received) == 1:
                 timeout_timer = time.time()
+                for sensor in absent_sensors:
+                    sensor.resest()
 
         except queue.Empty:
-            if data_received and \
-            (time.time() - timeout_timer) >= sensor_timeout:
-                absent_sensors = [s for s in sensors if s not in data_received]
-                for sensor in absent_sensors:
-                    sensor.no_data()
+            if data_received:
+                if (time.time() - timeout_timer) >= sensor_timeout:
+                    absent_sensors = [s for s in sensors if s not in data_received]
+                    for sensor in absent_sensors:
+                        sensor.no_data()
 
+                for sensor in [s for s in sensors if not s.active]:
+                    sensor.reset()
+                    
         new_hour = datetime.datetime.now().hour
         if new_hour != old_hour:
             if new_hour == 0:

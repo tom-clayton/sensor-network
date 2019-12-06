@@ -7,6 +7,8 @@
 #include <Wire.h>
 #include <ArduinoJson.h>
 
+#define LED   2
+
 struct Data{
   int temperature,
       humidity,
@@ -25,12 +27,14 @@ char mqtt_server[32];
 char location[16];
 unsigned long poll_period;
 unsigned long ack_timeout;
+unsigned long wifi_off_period = 0;
+
 bool demand_only;
-
 bool acknowledged = true;
-
+bool turn_off_wifi = false;
 unsigned long poll_timer = 0;
 unsigned long ack_timer; 
+unsigned long wifi_off_timer;
 
 char last_message[32];
 int message_id = 0;
@@ -98,13 +102,21 @@ int load_config() {
   return 1;
 }
 
+void flash_led(){
+    digitalWrite(LED, LOW);
+    delay(500);
+    digitalWrite(LED, HIGH);
+}
+
 void connect_to_wifi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
   while (WiFi.waitForConnectResult() != WL_CONNECTED) {
+    flash_led();
     delay(500);
     Serial.print(".");
   }
+  
 }
 
 void connect_to_mqtt() {
@@ -122,7 +134,10 @@ void connect_to_mqtt() {
     Serial.println(" try again in 5 seconds");
     // Wait 5 seconds before retrying
     ArduinoOTA.handle();
-    delay(5000);
+    flash_led();
+    delay(500);
+    flash_led();
+    delay(3500);
   }
 }
 
@@ -188,17 +203,37 @@ void callback(char* topic, byte* payload, unsigned int length)
     send_message(SCHEDULED, data);
   }
   else if (message == "ack"){
-    acknowledged = true; 
+    acknowledged = true;
+    if (turn_off_wifi) {
+      WiFi.mode(WIFI_OFF);
+      Serial.println("Wifi Disconnected");
+      turn_off_wifi = false;
+    }
   }
   else if (message == "poll"){
     Data data = aquire_data();
-    send_message(ON_DEMAND, data); 
+    send_message(ON_DEMAND, data);
+  }
+  else if (message.startsWith("p")){
+    Data data = aquire_data();
+    send_message(SCHEDULED, data);
+    message.remove(0, 1);
+    long wifi_off_period_sec = message.toInt();
+    if (wifi_off_period_sec){
+      turn_off_wifi = true;      
+      wifi_off_period = wifi_off_period_sec * 1000;
+      Serial.print("Turning off for ");
+      Serial.print(wifi_off_period_sec);
+      Serial.println(" seconds after ack");
+      wifi_off_timer = millis(); 
+    }
   }
 }
 
 void setup() 
 {
   Serial.begin(115200);
+  pinMode(LED, OUTPUT);
   Wire.begin();
   
   // Setup wifi:
@@ -234,11 +269,19 @@ void setup()
 
 void loop() 
 {
-  if (!client.connected()) {
+  // reconect wifi after timer:
+  if (WiFi.status() == WL_DISCONNECTED && 
+      (unsigned long)(millis() - wifi_off_timer) >= wifi_off_period){
+    connect_to_wifi();
+    wifi_off_period = 0;      
+  }
+  
+  // reconect mqtt:
+  if (WiFi.status() == WL_CONNECTED && !client.connected()) {
     connect_to_mqtt(); 
   }
 
-  // send data every poll_period mS: 
+  // send data every poll_period mS if in scheduled mode: 
   if (!demand_only && (unsigned long)(millis() - poll_timer) >= poll_period){
     Data data = aquire_data();
     send_message(SCHEDULED, data);
@@ -252,5 +295,5 @@ void loop()
   
   client.loop();
   ArduinoOTA.handle();
-  delay(5000);
+  delay(1000);
 }
