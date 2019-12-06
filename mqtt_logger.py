@@ -10,6 +10,7 @@ broker_address = "broker.mqttdashboard.com"
 
 sensor_locations = ("frontroom", "backroom", "backbedroom", "utilityroom") 
 sensor_timeout = 120 # in seconds
+retry_delay = 10
 
 data_queue = queue.Queue(10)
 
@@ -91,13 +92,20 @@ if __name__ == '__main__':
     client.on_message = on_message
     client.user_data_set(sensors)
     client.connect(broker_address, 1883, 60)
-    
+   
+    # wait for turn of hour:
+    mins = datetime.datetime.now().hour
+    while mins == datetime.datetime.now().hour:
+        sleep(60)
+
     # syncronise sensors:
     for sensor in sensors:
         sensor.reset()
-        
+    
+    retry_timer = time.time()
     data_received = []
     old_hour = datetime.datetime.now().hour
+    absent_sensors = []
     client.loop_start()
     
     while True:
@@ -112,7 +120,8 @@ if __name__ == '__main__':
             elif len(data_received) == 1:
                 timeout_timer = time.time()
                 for sensor in absent_sensors:
-                    sensor.resest()
+                    sensor.reset()
+                    retry_timer = time.time()
 
         except queue.Empty:
             if data_received:
@@ -122,7 +131,9 @@ if __name__ == '__main__':
                         sensor.no_data()
 
                 for sensor in [s for s in sensors if not s.active]:
-                    sensor.reset()
+                    if (time.time() - retry_timer) >= retry_delay:
+                        sensor.reset()
+                        retry_timer = time.time()
                     
         new_hour = datetime.datetime.now().hour
         if new_hour != old_hour:
