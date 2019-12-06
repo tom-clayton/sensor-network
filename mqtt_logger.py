@@ -96,7 +96,7 @@ if __name__ == '__main__':
     # wait for turn of hour:
     mins = datetime.datetime.now().hour
     while mins == datetime.datetime.now().hour:
-        sleep(60)
+        time.sleep(60)
 
     # syncronise sensors:
     for sensor in sensors:
