@@ -139,6 +139,7 @@ void connect_to_mqtt() {
     flash_led();
     delay(3500);
   }
+  digitalWrite(LED, HIGH);
 }
 
 Data aquire_data()
@@ -200,6 +201,7 @@ void callback(char* topic, byte* payload, unsigned int length)
   
   if (message == "reset" && !demand_only){
     Data data = aquire_data();
+    message_id = 0;
     send_message(SCHEDULED, data);
   }
   else if (message == "ack"){
