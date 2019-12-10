@@ -1,4 +1,54 @@
 
+/*
+ * Esp8266 MQTT temperature, humidity and dewpoint sensor. Tom Clayton 2019.
+ * 
+ * Modes:
+ * 
+ *   Demand:    
+ *        Set by poll period = 0.
+ *        Sensor only takes readings when externally polled.
+ *        Sensor can be requested to sleep (turn off wifi) for a period after sending data.
+ *              
+ *   Scheduled: 
+ *        Set by poll period > 0.
+ *        On boot, sensor will send it's location in a message to topic 'sensor_register' 
+ *        until acknowledged with 'ack_reg'.
+ *        Sensor will then wait for a 'reset' command before sending readings.
+ *        Sensor will send readings every set period to 'stamped' topic.              
+ *        Data will be stamped with an ID number.
+ *        Sensor will re-send data with same ID until acknowledged with 'ack_data'.
+ *        Sensor will sleep between readings if sleep mode is set.
+ *        Sensor will wait for a set period before sleeping to allow reseting or 
+ *        firmware updates. <----TODO
+ *                
+ * Commands(send to 'input' topic):              
+ *      
+ *   POLL:
+ *        Data will be sent on 'unstamped' topic.
+ *        Sensor will not wait for acknowledgement.
+ *        Sensor will not sleep.
+ *                
+ *   Px(where x is an integer):
+ *        Demand mode only.
+ *        Data will be sent on 'stamped' topic.
+ *        Data will be stamped with an ID number.
+ *        Sensor will re-send data with same ID until acknowledged.
+ *        Sensor will sleep for x seconds after acknowledgement.
+ *                
+ *    RESET:
+ *        Scheduled mode only.
+ *        Sensor will send a reading then revert to scheduled readings.
+ *                              
+ *                 
+ * All topics are pre-pended with the sensor's location. i.e location/input
+ * 
+ * 
+ * Led signalling:
+ *    Constant flashing:  Connecting to Wifi.
+ *    Single Flash:       Connecting to MQTT.
+ *    Double Flash:       Sending data.
+ */
+
 #include <ESP8266WiFi.h>
 #include <ArduinoOTA.h>
 #include <PubSubClient.h>
@@ -7,7 +57,8 @@
 #include <Wire.h>
 #include <ArduinoJson.h>
 
-#define LED   2
+#define LED           2
+#define WAKE_PERIOD   120000
 
 struct Data{
   int temperature,
@@ -16,9 +67,16 @@ struct Data{
 };
 
 enum MessageType{
-  SCHEDULED,
+  STAMPED,
   RETRY,
-  ON_DEMAND
+  UNSTAMPED,
+  REG,
+  ACK
+};
+
+enum ackType{
+  DATA_ACK,
+  REG_ACK
 };
 
 char ssid[16];
@@ -27,23 +85,32 @@ char mqtt_server[32];
 char location[16];
 unsigned long poll_period;
 unsigned long ack_timeout;
-unsigned long wifi_off_period = 0;
 
-bool demand_only;
-bool acknowledged = true;
+unsigned long sleep_period = 0;
+bool demand_mode;
+bool sleep_mode;
+bool taking_readings = false;
+bool data_ack = true;
+bool reg_ack = false;
 bool turn_off_wifi = false;
-unsigned long poll_timer = 0;
+
+unsigned long poll_timer;
 unsigned long ack_timer; 
-unsigned long wifi_off_timer;
+unsigned long sleep_timer;
+unsigned long wake_timer;
 
 char last_message[32];
 int message_id = 0;
+int last_reset_id = -1;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 
-// OTA Functions: 
-
+/* 
+ *        on_ota_start
+ *    
+ *    Initialises over the air programming capabitities. 
+ */ 
 void on_ota_start() {
     String type;
     if (ArduinoOTA.getCommand() == U_FLASH) {
@@ -55,10 +122,16 @@ void on_ota_start() {
     // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
 }
 
+/*
+ *      load_config
+ *   
+ *   Loads settings from config file.
+ *   
+ */
 int load_config() {
 
   File file;
-  const size_t capacity = JSON_OBJECT_SIZE(6) + 150;
+  const size_t capacity = JSON_OBJECT_SIZE(7) + 150;
   DynamicJsonDocument doc(capacity);
 
   if(!SPIFFS.begin()){
@@ -81,13 +154,14 @@ int load_config() {
   long poll_period_sec = doc["poll period"];
   if (poll_period_sec){
     poll_period = poll_period_sec * 1000;
-    demand_only = false;
+    demand_mode = false;
   }
   else{
-    demand_only = true;
+    demand_mode = true;
   }
   
   ack_timeout = doc["ack timeout"]; 
+  sleep_mode = doc["sleep mode"];
   
   file.close();
   
@@ -101,13 +175,26 @@ int load_config() {
   //Serial.println(poll_period);
   return 1;
 }
-
+/*
+ *        flash_led
+ *    
+ *    flashes LED once.    
+ *    
+ */
 void flash_led(){
     digitalWrite(LED, LOW);
     delay(500);
     digitalWrite(LED, HIGH);
 }
 
+/*
+ * 
+ *      connect_to_wifi
+ *      
+ *    Connects to the wireless newtork given in settings.
+ *    Flashed LED constantly when trying to connect.
+ *    
+ */
 void connect_to_wifi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
@@ -119,6 +206,14 @@ void connect_to_wifi() {
   
 }
 
+/*
+ *      connect_to_mqtt
+ * 
+ * 
+ *   Connects to the wireless newtork given in settings.
+ *   Flashes LED once every 4 seconds when trying to connect.
+ *   
+ */
 void connect_to_mqtt() {
   Serial.print("Attempting MQTT connection...");
   
@@ -135,14 +230,19 @@ void connect_to_mqtt() {
     // Wait 5 seconds before retrying
     ArduinoOTA.handle();
     flash_led();
-    delay(500);
-    flash_led();
-    delay(3500);
+    delay(4000);
   }
-  digitalWrite(LED, HIGH);
 }
 
-Data aquire_data()
+/*
+ * 
+ *        acquire_data
+ *        
+ *    acquires data from SHT21 sensor.
+ *    Returns data structure.
+ *    
+ */
+Data acquire_data()
 {
   Data output = {
     (int)SHT2x.GetTemperature(),
@@ -152,32 +252,55 @@ Data aquire_data()
   return output;
 }
 
+/*
+ *        send message
+ *        
+ *    Sends mqtt message to relevent topic depending on message type.
+ *    Flashes LED twice.    
+ *    
+ */
+void send_message(MessageType type){
+  Data data;
+  send_message(type, data);
+}
+
 void send_message(MessageType type, Data data){
   char topic[32];
   char message[32];
   switch (type){
-    case SCHEDULED:{
+    case STAMPED:{
       sprintf (message, "%d: %d, %d, %d", message_id++, 
                                           data.temperature, 
                                           data.humidity, 
                                           data.dew_point);
-      sprintf (topic, "%s/scheduled", location);
+      sprintf (topic, "%s/stamped", location);
       strcpy(last_message, message);
-      acknowledged = false;
+      data_ack = false;
       poll_timer = ack_timer = millis();
       break;
     }
     case RETRY:{
-      sprintf (topic, "%s/scheduled", location);
+      sprintf (topic, "%s/stamped", location);
       strcpy(message, last_message);
       ack_timer = millis();
       break;
     }
-    case ON_DEMAND:{
+    case UNSTAMPED:{
       sprintf (message, "%d, %d, %d", data.temperature, 
                                       data.humidity, 
                                       data.dew_point);
-      sprintf (topic, "%s/ondemand", location);
+      sprintf (topic, "%s/unstamped", location);
+      break;
+    }
+    case REG:{
+      sprintf(message, location);
+      sprintf(topic, "sensor_register");
+      ack_timer = millis();
+      break;
+    }
+    case ACK:{
+      sprintf(message, location);
+      sprintf(topic, "acknowledgements");
       break;
     }
   }
@@ -186,8 +309,98 @@ void send_message(MessageType type, Data data){
   Serial.print(topic);
   Serial.print("]: ");
   Serial.println(message);
+  flash_led();
+  delay(500);
+  flash_led();
 }
 
+/*
+ *        on_reset
+ *        
+ *    Takes and sends an imediate reading. 
+ *    Starts taking scheduled readings.
+ */
+void on_reset(int id)
+{
+  if (id != last_reset_id){
+    Data data = acquire_data();
+    send_message(STAMPED, data);
+    taking_readings = true;
+    last_reset_id = id;
+  }
+}
+
+/*
+ *        on_ack
+ *        
+ *    Stops re-sending messages.
+ *    Sleeps if in sleep mode.
+ */
+void on_ack(ackType ack_type)
+{
+  if (ack_type == DATA_ACK){
+    data_ack = true;
+    if (turn_off_wifi) {
+      WiFi.mode(WIFI_OFF);
+      Serial.println("Wifi Disconnected");
+      turn_off_wifi = false;
+    }
+  }
+  else if (ack_type = REG_ACK){
+    reg_ack = true;
+  }
+}
+
+/*
+ *        on_unstamped_poll
+ *        
+ *    Takes reading and sends data.
+ */
+void on_unstamped_poll()
+{
+  Data data = acquire_data();
+  send_message(UNSTAMPED, data);
+}
+
+/*        
+ *         on_stamped_poll
+ *     
+ *     Takes reading and sends data.
+ *     Sets up sleep period if requested.
+ */
+void on_stamped_poll(long sleep_sec)
+{
+  Data data = acquire_data();
+  send_message(STAMPED, data);
+  if (sleep_sec){
+    turn_off_wifi = true;      
+    sleep_period = sleep_sec * 1000;
+    Serial.print("Turning off for ");
+    Serial.print(sleep_sec);
+    Serial.println(" seconds after ack");
+    sleep_timer = millis(); 
+  }
+}
+
+/*
+ *        on_standby
+ *        
+ *    Sends acknoledgement.    
+ *    stops taking readings.
+ */
+ void on_standby()
+ {
+  send_message(ACK);
+  taking_readings = false;
+ }
+
+
+/*
+ *        callback
+ *        
+ *    Receives and parses incomming mqtt messages.
+ *    
+ */
 void callback(char* topic, byte* payload, unsigned int length) 
 {
   Serial.print("Message received [");
@@ -199,39 +412,37 @@ void callback(char* topic, byte* payload, unsigned int length)
   }
   Serial.println(message);
   
-  if (message == "reset" && !demand_only){
-    Data data = aquire_data();
-    message_id = 0;
-    send_message(SCHEDULED, data);
+  if (message.startsWith("r") && !demand_mode){
+    message.remove(1, 0);
+    on_reset(message.toInt());
   }
-  else if (message == "ack"){
-    acknowledged = true;
-    if (turn_off_wifi) {
-      WiFi.mode(WIFI_OFF);
-      Serial.println("Wifi Disconnected");
-      turn_off_wifi = false;
+  else if (message.startsWith("ack")){
+    message.remove(0, 4);
+    if (message == "data"){
+      on_ack(DATA_ACK);
+    }
+    else if (message == "reg"){
+      on_ack(REG_ACK);
     }
   }
   else if (message == "poll"){
-    Data data = aquire_data();
-    send_message(ON_DEMAND, data);
+    on_unstamped_poll();
   }
   else if (message.startsWith("p")){
-    Data data = aquire_data();
-    send_message(SCHEDULED, data);
     message.remove(0, 1);
-    long wifi_off_period_sec = message.toInt();
-    if (wifi_off_period_sec){
-      turn_off_wifi = true;      
-      wifi_off_period = wifi_off_period_sec * 1000;
-      Serial.print("Turning off for ");
-      Serial.print(wifi_off_period_sec);
-      Serial.println(" seconds after ack");
-      wifi_off_timer = millis(); 
-    }
+    on_stamped_poll(message.toInt());
+  }
+  else if (message == "standby"){
+    on_standby();
   }
 }
 
+/*
+ *        setup
+ *        
+ *    Initialisations.
+ *    
+ */
 void setup() 
 {
   Serial.begin(115200);
@@ -248,7 +459,6 @@ void setup()
   Serial.println(""); 
   Serial.print("Sensor location: ");
   Serial.println(location);
-  
   connect_to_wifi();
   Serial.print("Connected to ");
   Serial.println(ssid);
@@ -257,11 +467,6 @@ void setup()
   
   // Setup ota:
   ArduinoOTA.onStart(on_ota_start);
-  /*
-  ArduinoOTA.onEnd(on_ota_end);
-  ArduinoOTA.onProgress(on_ota_progress);
-  ArduinoOTA.onError(on_ota_error);
-  */
   ArduinoOTA.begin();
 
   // Setup mqtt:
@@ -269,13 +474,19 @@ void setup()
   client.setCallback(callback);
 }
 
+/*
+ *        loop
+ *        
+ *    Main loop.
+ *    
+ */
 void loop() 
 {
   // reconect wifi after timer:
   if (WiFi.status() == WL_DISCONNECTED && 
-      (unsigned long)(millis() - wifi_off_timer) >= wifi_off_period){
+      (unsigned long)(millis() - sleep_timer) >= sleep_period){
     connect_to_wifi();
-    wifi_off_period = 0;      
+    sleep_period = 0;      
   }
   
   // reconect mqtt:
@@ -283,18 +494,21 @@ void loop()
     connect_to_mqtt(); 
   }
 
-  // send data every poll_period mS if in scheduled mode: 
-  if (!demand_only && (unsigned long)(millis() - poll_timer) >= poll_period){
-    Data data = aquire_data();
-    send_message(SCHEDULED, data);
+  // send / re-send register message until acknowledgement:
+  if (!demand_mode && !reg_ack && ((unsigned long)(millis() - ack_timer) >= ack_timeout)){
+    send_message(REG);
+  }
+  // re-send data until acknowledgement:
+  else if (!data_ack && ((unsigned long)(millis() - ack_timer) >= ack_timeout)){
+    send_message(RETRY);
+  }
+  // send data every poll_period mS if nessesary: 
+  else if (taking_readings && (unsigned long)(millis() - poll_timer) >= poll_period){
+    Data data = acquire_data();
+    send_message(STAMPED, data);
+    turn_off_wifi = sleep_mode ? true : false;
   }
 
-  // re-send data every ack_timeout mS until acknowledgement:
-  else if (!acknowledged && ((unsigned long)(millis() - ack_timer) >= ack_timeout)){
-    Data data;
-    send_message(RETRY, data);
-  }
-  
   client.loop();
   ArduinoOTA.handle();
   delay(1000);
