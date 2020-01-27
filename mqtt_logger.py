@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import paho.mqtt.client as mqtt
-import datetime
 import time
 import queue
 
@@ -9,10 +8,11 @@ import queue
 broker_address = "broker.mqttdashboard.com"
 
 sensor_locations = ("frontroom", "backroom", "backbedroom", "utilityroom") 
-sensor_timeout = 120 # in seconds
-retry_delay = 10
 
-data_queue = queue.Queue(10)
+sensor_timeout = 5 * 60
+global_sleep_time = 50 * 60
+
+response_queue = queue.Queue(10)
 
 class Sensor:
     def __init__(self, location, client, index):
@@ -21,12 +21,11 @@ class Sensor:
         self.last_message_id = None
         self.last_message = None
         self.index = index
-        self.retries = 0
-        self.active = False
+        self.retries = 3
 
     def subscribe(self):
-        self.client.subscribe(f"{self.location}/scheduled")
-        print(f"Subscribing: {self.location}/scheduled")    
+        self.client.subscribe(f"{self.location}/stamped")
+        print(f"Subscribing: {self.location}/stamped")    
 
     def receive(self, message):
         message_id, payload = message.split(':')
@@ -34,8 +33,7 @@ class Sensor:
             return
         self.last_message = payload.strip()
         self.last_message_id = message_id
-        data_queue.put(self)
-        self.active = True
+        response_queue.put(self)
 
     def publish(self, message):
         client.publish(f"{self.location}/input", 
@@ -43,18 +41,25 @@ class Sensor:
                        qos=0, 
                        retain=False)
 
+    def poll_sleep(self, sleep_time):
+        self.publish(f"P{sleep_time}")
+
     def acknowledge(self):
         self.publish("ack")
 	
-    def reset(self):
-        self.publish("reset")
+    def reset(self, reset_id):
+        self.publish("r" + str(reset_id))
         print(f"resetting {self}")
+
+    def retry(self):
+        sleep_time = global_sleep_time - sensor_timeout * (4 - self.retries)
+        self.poll_sleep(sleep_time)
+        print(f"{self.location} retry: P{sleep_time}")
+        self.retries -= 1
 
     def no_data(self):
         self.last_message = ", , "
-        data_queue.put(self)
         print(f"No data from {self}")
-        # log sensor failure
 
     def __str__(self):
         return self.location
@@ -64,8 +69,8 @@ def write_to_file(sensors):
     print ("Writing to disk")
     sensors.sort(key=lambda x: x.index)
     with open("results", "a") as fo:
-        fo.write(datetime.datetime.now()\
-                     .replace(microsecond=0).isoformat(" "))
+        fo.write(time.strftime('%Y-%m-%d %H:00',
+                               time.localtime(time.time())))
         for sensor in sensors:
             fo.write(f", {sensor.last_message}")
         fo.write("\n")
@@ -78,11 +83,12 @@ def on_connect(client, sensors, flags, rc):
 
 def on_message(client, sensors, msg):
     print (f"message received {msg.topic} {msg.payload}")
+
     for sensor in sensors:
         if msg.topic.split('/')[0] == sensor.location:
             #print (f"sensor: {sensor}")
             sensor.receive(msg.payload.decode())
-            sensor.acknowledge()
+            sensor.acknowledge("data")
 
 if __name__ == '__main__':
     client = mqtt.Client()
@@ -92,54 +98,46 @@ if __name__ == '__main__':
     client.on_message = on_message
     client.user_data_set(sensors)
     client.connect(broker_address, 1883, 60)
-   
-    # wait for turn of hour:
-    mins = datetime.datetime.now().hour
-    while mins == datetime.datetime.now().hour:
-        time.sleep(60)
-
-    # syncronise sensors:
-    for sensor in sensors:
-        sensor.reset()
-    
-    retry_timer = time.time()
-    data_received = []
-    old_hour = datetime.datetime.now().hour
-    absent_sensors = []
+    prev_hour = time.localtime(time.time()).tm_hour   
+    sensors_responded = []
+    polling = False
     client.loop_start()
     
     while True:
+        # Poll sensors on hour:
+        hour = time.localtime(time.time()).tm_hour
+        if hour != prev_hour:
+            sensors_responded = []
+            polling = True
+            for sensor in sensors:
+                sensor.retries = 3
+                sensor.poll_sleep(global_sleep_time)
+            sensor_timer = time.time()
+            prev_hour = hour
+
+        # Check for responses:
         try:
-            sensor = data_queue.get(block=False)
-            if sensor not in data_received:
-                data_received.append(sensor)
-            
-            if len(data_received) == len(sensor_locations):
-                write_to_file(data_received)
-                data_received = []
-            elif len(data_received) == 1:
-                timeout_timer = time.time()
-                for sensor in absent_sensors:
-                    sensor.reset()
-                    retry_timer = time.time()
-
+            sensor = response_queue.get(block=False)
+            if sensor not in sensors_responded:
+                sensors_responded.append(sensor)     
         except queue.Empty:
-            if data_received:
-                if (time.time() - timeout_timer) >= sensor_timeout:
-                    absent_sensors = [s for s in sensors if s not in data_received]
-                    for sensor in absent_sensors:
-                        sensor.no_data()
+            pass
 
-                for sensor in [s for s in sensors if not s.active]:
-                    if (time.time() - retry_timer) >= retry_delay:
-                        sensor.reset()
-                        retry_timer = time.time()
+        # Check timeout:
+        if polling and time.time() - sensor_timer >= sensor_timeout:
+            for sensor in (s for s in sensors if s not in sensors_responded):
+                if sensor.retries:
+                    sensor.retry()
+                else:
+                    sensor.no_data()
+                    sensors_responded.append(sensor)
+
+            sensor_timer = time.time()
                     
-        new_hour = datetime.datetime.now().hour
-        if new_hour != old_hour:
-            if new_hour == 0:
-                for sensor in sensors:
-                    sensor.reset()
-            old_hour = new_hour
+         # Check all responses in:
+         if polling and len(sensors_responded) == len(sensors):
+            write_to_file(sensors_responded)
+            polling = False           
+
     
 
