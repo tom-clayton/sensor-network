@@ -4,10 +4,11 @@ import paho.mqtt.client as mqtt
 import time
 import queue
 
-#broker_address = "localhost"
-broker_address = "broker.mqttdashboard.com"
+broker_address = "localhost"
+#broker_address = "broker.mqttdashboard.com"
 
-sensor_locations = ("frontroom", "backroom", "backbedroom", "utilityroom") 
+#sensor_locations = ("frontroom", "backroom", "backbedroom", "utilityroom") 
+sensor_locations = ("backroom",)
 
 sensor_timeout = 5 * 60
 global_sleep_time = 50 * 60
@@ -134,8 +135,8 @@ if __name__ == '__main__':
 
             sensor_timer = time.time()
                     
-         # Check all responses in:
-         if polling and len(sensors_responded) == len(sensors):
+        # Check all responses in:
+        if polling and len(sensors_responded) == len(sensors):
             write_to_file(sensors_responded)
             polling = False           
 
