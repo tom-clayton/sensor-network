@@ -44,8 +44,8 @@ class Sensor:
     def poll_sleep(self, sleep_time):
         self.publish(f"P{sleep_time}")
 
-    def acknowledge(self):
-        self.publish("ack")
+    def acknowledge(self, ack_type):
+        self.publish(f"ack_{ack_type}")
 	
     def reset(self, reset_id):
         self.publish("r" + str(reset_id))
@@ -126,7 +126,7 @@ if __name__ == '__main__':
         # Check timeout:
         if polling and time.time() - sensor_timer >= sensor_timeout:
             for sensor in (s for s in sensors if s not in sensors_responded):
-                if retries < (6 * 15)
+                if retries < (6 * 15):
                     sensor.poll_sleep(global_sleep_time - 10*retries)
                 else:
                     sensor.no_data()
@@ -140,5 +140,5 @@ if __name__ == '__main__':
             write_to_file(sensors_responded)
             polling = False           
 
-    
+        time.sleep(1)    
 
