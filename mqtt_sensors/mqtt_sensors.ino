@@ -35,7 +35,7 @@
  *        Sensor will re-send data with same ID until acknowledged.
  *        Sensor will sleep for x seconds after acknowledgement.
  *                
- *    RESET:
+ *    Rx:
  *        Scheduled mode only.
  *        Sensor will send a reading then revert to scheduled readings.
  *                              
@@ -412,7 +412,7 @@ void callback(char* topic, byte* payload, unsigned int length)
   }
   Serial.println(message);
   
-  if (message.startsWith("r") && !demand_mode){
+  if (message.startsWith("R") && !demand_mode){
     message.remove(1, 0);
     on_reset(message.toInt());
   }
@@ -425,10 +425,10 @@ void callback(char* topic, byte* payload, unsigned int length)
       on_ack(REG_ACK);
     }
   }
-  else if (message == "poll"){
+  else if (message == "POLL"){
     on_unstamped_poll();
   }
-  else if (message.startsWith("p")){
+  else if (message.startsWith("P")){
     message.remove(0, 1);
     on_stamped_poll(message.toInt());
   }
