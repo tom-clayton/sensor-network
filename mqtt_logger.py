@@ -10,7 +10,7 @@ broker_address = "localhost"
 #sensor_locations = ("frontroom", "backroom", "backbedroom", "utilityroom") 
 sensor_locations = ("backroom",)
 
-sensor_timeout = 5 * 60
+sensor_timeout = 10
 global_sleep_time = 50 * 60
 
 response_queue = queue.Queue(10)
@@ -22,7 +22,6 @@ class Sensor:
         self.last_message_id = None
         self.last_message = None
         self.index = index
-        self.retries = 3
 
     def subscribe(self):
         self.client.subscribe(f"{self.location}/stamped")
@@ -110,8 +109,8 @@ if __name__ == '__main__':
         if hour != prev_hour:
             sensors_responded = []
             polling = True
+            retries = 0
             for sensor in sensors:
-                sensor.retries = 3
                 sensor.poll_sleep(global_sleep_time)
             sensor_timer = time.time()
             prev_hour = hour
@@ -127,13 +126,14 @@ if __name__ == '__main__':
         # Check timeout:
         if polling and time.time() - sensor_timer >= sensor_timeout:
             for sensor in (s for s in sensors if s not in sensors_responded):
-                if sensor.retries:
-                    sensor.retry()
+                if retries < (6 * 15)
+                    sensor.poll_sleep(global_sleep_time - 10*retries)
                 else:
                     sensor.no_data()
                     sensors_responded.append(sensor)
 
             sensor_timer = time.time()
+            retries += 1
                     
         # Check all responses in:
         if polling and len(sensors_responded) == len(sensors):
