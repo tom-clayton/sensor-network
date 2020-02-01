@@ -4,7 +4,7 @@ esp8266 sensor network
 sensor instructions:
 
   
- * Modes:
+Modes:
   
  *   Demand:    
          Set by poll period = 0.
@@ -23,7 +23,7 @@ sensor instructions:
          Sensor will wait for a set period before sleeping to allow reseting or 
          firmware updates. <----TODO
                  
- * Commands(send to 'input' topic):              
+ Commands(send to 'input' topic):              
        
  *   POLL:
          Data will be sent on 'unstamped' topic.
@@ -45,7 +45,7 @@ sensor instructions:
  All topics are pre-pended with the sensor's location. i.e location/input
   
  
- * Led signalling:
+ Led signalling:
      Constant flashing:  Connecting to Wifi.
      Single Flash:       Connecting to MQTT.
      Double Flash:       Sending data.
