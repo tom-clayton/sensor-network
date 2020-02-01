@@ -459,6 +459,9 @@ void setup()
   Serial.println(""); 
   Serial.print("Sensor location: ");
   Serial.println(location);
+  
+  digitalWrite(LED, HIGH);
+  
   connect_to_wifi();
   Serial.print("Connected to ");
   Serial.println(ssid);
