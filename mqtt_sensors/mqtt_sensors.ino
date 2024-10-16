@@ -2,107 +2,105 @@
 /*
  * Esp8266 MQTT temperature, humidity and dewpoint sensor. Tom Clayton 2019.
  * 
- * Modes:
+ * Operating modes:
  * 
  *   Demand:    
- *        Set by poll period = 0.
- *        Sensor only takes readings when externally polled.
- *        Sensor can be requested to sleep (turn off wifi) for a period after sending data.
+ *     Set by poll period = 0.
+ *     Sensor only takes readings when externally polled.
+ *     No sleep, stamped or wait modes.
  *              
  *   Scheduled: 
- *        Set by poll period > 0.
- *        On boot, sensor will send it's location in a message to topic 'sensor_register' 
- *        until acknowledged with 'ack_reg'.
- *        Sensor will then wait for a 'reset' command before sending readings.
- *        Sensor will send readings every set period to 'stamped' topic.              
- *        Data will be stamped with an ID number.
- *        Sensor will re-send data with same ID until acknowledged with 'ack_data'.
- *        Sensor will sleep between readings if sleep mode is set.
- *        Sensor will wait for a set period before sleeping to allow reseting or 
- *        firmware updates. <----TODO
- *                
- * Commands(send to 'input' topic):              
- *      
- *   POLL:
- *        Data will be sent on 'unstamped' topic.
- *        Sensor will not wait for acknowledgement.
- *        Sensor will not sleep.
- *                
- *   Px(where x is an integer):
- *        Demand mode only.
- *        Data will be sent on 'stamped' topic.
- *        Data will be stamped with an ID number.
- *        Sensor will re-send data with same ID until acknowledged.
- *        Sensor will sleep for x seconds after acknowledgement.
- *                
- *    Rx:
- *        Scheduled mode only.
- *        Sensor will send a reading then revert to scheduled readings.
- *                              
- *                 
- * All topics are pre-pended with the sensor's location. i.e location/input
+ *     Set by poll period > 0.
  * 
+ *     Sensor takes and sends a reading every poll period.
+ *     Can be reset to immediately take a reading for syncing of
+ *     sensors.
+ * 
+ *     Sleep mode turns off Wifi between readings.
+ *     Stamped mode will ID every reading and resend until acknowledged.
+ *     Wait mode will not send anything until reset.
+ *             
+ *     Note: can't reset during sleep mode. (excluding first reset in
+ *     wait mode.)
+ *    
+ * Commands:              
+ *   
+ *  (P)oll:
+ *     Sensor will send a reading.
+ *     Sensor will not sleep.
+ *     Re-poll if nothing received.
+ *  
+ *  (R)eset:
+ *     Sensor will send a reading then revert to timed readings.
+ * 
+ *  [ID number]:
+ *     Sensor will stop sending reading with given ID number.
+ *            
+ * Config json file settings:
+ *     SSID - Wifi name (string)
+ *     password - Wifi password (string)
+ *     mqtt server - server address (string)
+ *     name - unique name for sensor (string)
+ *     poll period - time between readings (int: seconds)
+ *     sleep mode - sleep between readings (int: 1, 0) 
+ *     stamped mode - ID readings and retry until acknowledged (int: 1, 0)
+ *     wait mode - wait for reset before starting readings (int: 1, 0)
+ *     retry period - time before retrying if in stamped mode (int: seconds)
+ *                   
+ * Topic Naming (name as given in config file):
+ *     name/input                 
+ *     name/output
  * 
  * Led signalling:
- *    Constant flashing:  Connecting to Wifi.
- *    Single Flash:       Connecting to MQTT.
- *    Double Flash:       Sending data.
+ *     Fast flashing:   Connecting to Wifi.
+ *     Slow flashing:   Connecting to MQTT.
+ *     Double flash:    Sending data.
+ * 
+ * OTA:
+ *     Over the air re-programming is currently unavailable.
  */
 
 #include <ESP8266WiFi.h>
-#include <ArduinoOTA.h>
+//#include <ArduinoOTA.h>
 #include <PubSubClient.h>
 #include <FS.h>
-#include <Sodaq_SHT2x.h>
-#include <Wire.h>
+#include <LittleFS.h>
+#include <Sodaq_SHT2x.h>  
+#include <Wire.h>         
 #include <ArduinoJson.h>
 
 #define LED           2
-#define WAKE_PERIOD   120000
+#define N_SETTINGS    9
+#define MQTT_PORT     1883
 
-struct Data{
-  int temperature,
-      humidity,
-      dew_point;
-};
-
-enum MessageType{
-  STAMPED,
-  RETRY,
-  UNSTAMPED,
-  REG,
-  ACK
-};
-
-enum ackType{
-  DATA_ACK,
-  REG_ACK
-};
-
+// buffers:
 char ssid[16];
 char password[16];
 char mqtt_server[32];
-char location[16];
-unsigned long poll_period;
-unsigned long ack_timeout;
+char name[16];
+char in_topic[32];
+char out_topic[32];
+char out_message[32];
+char reading[32];
 
-unsigned long sleep_period = 0;
+// settings:
+unsigned long poll_period;
+unsigned long retry_period;
 bool demand_mode;
 bool sleep_mode;
-bool taking_readings = false;
-bool data_ack = true;
-bool reg_ack = false;
-bool turn_off_wifi = false;
+bool stamped_mode;
+bool wait_mode;
 
+// status:
+bool taking_readings;
+bool data_ack;
+int message_id;
+
+// timers:
 unsigned long poll_timer;
-unsigned long ack_timer; 
-unsigned long sleep_timer;
-unsigned long wake_timer;
+unsigned long retry_timer; 
 
-char last_message[32];
-int message_id = 0;
-int last_reset_id = -1;
-
+// singletons:
 WiFiClient espClient;
 PubSubClient client(espClient);
 
@@ -111,7 +109,12 @@ PubSubClient client(espClient);
  *    
  *    Initialises over the air programming capabitities. 
  */ 
+/*
 void on_ota_start() {
+    if (ArduinoOTA.getCommand() != U_FLASH){
+      SPIFFS.end();
+    }
+    
     String type;
     if (ArduinoOTA.getCommand() == U_FLASH) {
       type = "sketch";
@@ -121,7 +124,7 @@ void on_ota_start() {
     }
     // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
 }
-
+*/
 /*
  *      load_config
  *   
@@ -131,9 +134,23 @@ void on_ota_start() {
 int load_config() {
 
   File file;
-  const size_t capacity = JSON_OBJECT_SIZE(7) + 150;
+  const size_t capacity = JSON_OBJECT_SIZE(N_SETTINGS) + 150;
   DynamicJsonDocument doc(capacity);
+  
+  Serial.println("\nMounting filesystem...");
 
+  if(!LittleFS.begin()){
+    Serial.println("An Error has occurred while mounting filesystem");
+    return 0;
+  }
+  
+  file = LittleFS.open("/config.json", "r");
+  if(!file){
+    Serial.println("Failed to open file for reading");
+    return 0;
+  }
+
+  /*
   if(!SPIFFS.begin()){
     Serial.println("An Error has occurred while mounting SPIFFS");
     return 0;
@@ -143,38 +160,43 @@ int load_config() {
   if(!file){
     Serial.println("Failed to open file for reading");
     return 0;
-  }
+  }*/
+
   deserializeJson(doc, file);
   
   strcpy(ssid, doc["ssid"]);  
   strcpy(password, doc["password"]); 
-  strcpy(mqtt_server, doc["mqtt server"]); 
-  strcpy(location, doc["location"]);
+  strcpy(mqtt_server, doc["mqtt server"]);
+  strcpy(name, doc["name"]);
+  sprintf(in_topic, "%s/input", name);
+  sprintf(out_topic, "%s/output", name);
 
-  long poll_period_sec = doc["poll period"];
+  unsigned long poll_period_sec = doc["poll period"];
+  
   if (poll_period_sec){
     poll_period = poll_period_sec * 1000;
     demand_mode = false;
-  }
-  else{
+    sleep_mode = doc["sleep mode"];
+    stamped_mode = doc["stamped mode"];
+    wait_mode = doc["wait mode"];
+        
+    if (stamped_mode){
+      unsigned long retry_period_sec = doc["retry period"];
+      retry_period = retry_period_sec * 1000; 
+    }
+  } else {
     demand_mode = true;
+    sleep_mode = false;
+    stamped_mode = false;
+    wait_mode = false;
   }
-  
-  ack_timeout = doc["ack timeout"]; 
-  sleep_mode = doc["sleep mode"];
-  
-  file.close();
-  
-  Serial.println();
-  
-  //Serial.println(ssid);
-  //Serial.println(password);
-  //Serial.println(mqtt_server);
 
-  //Serial.println(poll_period_sec);
-  //Serial.println(poll_period);
+  file.close();
+  Serial.println("Config loaded.");
+  Serial.println(poll_period);
   return 1;
 }
+
 /*
  *        flash_led
  *    
@@ -195,7 +217,8 @@ void flash_led(){
  *    Flashed LED constantly when trying to connect.
  *    
  */
-void connect_to_wifi() {
+void connect_to_wifi() 
+{
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
   while (WiFi.waitForConnectResult() != WL_CONNECTED) {
@@ -203,36 +226,39 @@ void connect_to_wifi() {
     delay(500);
     Serial.print(".");
   }
-  
+  Serial.println("Wifi connected");
 }
 
 /*
  *      connect_to_mqtt
  * 
  * 
- *   Connects to the wireless newtork given in settings.
- *   Flashes LED once every 4 seconds when trying to connect.
+ *   Connects to the mqtt newtork given in settings.
+ *   Flashes LED once every 5 seconds when trying to connect.
  *   
  */
 void connect_to_mqtt() {
   Serial.print("Attempting MQTT connection...");
   
-  // Attempt to connect
-  if (client.connect(location)) {
-    Serial.println("connected");
-    char topic[32];
-    sprintf(topic, "%s/input", location);
-    client.subscribe(topic);
-  } else {
-    Serial.print("failed, rc=");
-    Serial.print(client.state());
-    Serial.println(" try again in 5 seconds");
-    // Wait 5 seconds before retrying
-    ArduinoOTA.handle();
-    flash_led();
-    delay(4000);
+  while (!client.connected()){
+    // Attempt to connect
+    if (client.connect(name)) {
+      Serial.println("connected");
+      client.subscribe(in_topic);
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      //ArduinoOTA.handle();
+      flash_led();
+      delay(5000);
+    }
   }
+  Serial.println("MQTT connected");
 }
+
+
 
 /*
  * 
@@ -242,158 +268,76 @@ void connect_to_mqtt() {
  *    Returns data structure.
  *    
  */
-Data acquire_data()
+void acquire_data() 
 {
-  Data output = {
+  sprintf (
+    reading, 
+    "%d, %d",
     (int)SHT2x.GetTemperature(),
-    (int)SHT2x.GetHumidity(),
-    (int)SHT2x.GetDewPoint(),
-  };
-  return output;
+    (int)SHT2x.GetHumidity()
+  );
 }
 
 /*
- *        send message
+ *        sleep
  *        
- *    Sends mqtt message to relevent topic depending on message type.
- *    Flashes LED twice.    
- *    
+ *    turn off Wifi.
  */
-void send_message(MessageType type){
-  Data data;
-  send_message(type, data);
+void sleep()
+{
+    WiFi.mode(WIFI_OFF);
+    Serial.println("Wifi Disconnected");
+    digitalWrite(LED, LOW);
 }
 
-void send_message(MessageType type, Data data){
-  char topic[32];
-  char message[32];
-  switch (type){
-    case STAMPED:{
-      sprintf (message, "%d: %d, %d, %d", message_id++, 
-                                          data.temperature, 
-                                          data.humidity, 
-                                          data.dew_point);
-      sprintf (topic, "%s/stamped", location);
-      strcpy(last_message, message);
-      data_ack = false;
-      poll_timer = ack_timer = millis();
-      break;
-    }
-    case RETRY:{
-      sprintf (topic, "%s/stamped", location);
-      strcpy(message, last_message);
-      ack_timer = millis();
-      break;
-    }
-    case UNSTAMPED:{
-      sprintf (message, "%d, %d, %d", data.temperature, 
-                                      data.humidity, 
-                                      data.dew_point);
-      sprintf (topic, "%s/unstamped", location);
-      break;
-    }
-    case REG:{
-      sprintf(message, location);
-      sprintf(topic, "sensor_register");
-      ack_timer = millis();
-      break;
-    }
-    case ACK:{
-      sprintf(message, location);
-      sprintf(topic, "acknowledgements");
-      break;
-    }
-  }
-  client.publish(topic, message);
+/*
+ *        publish
+ *
+ *      send message in buffer.
+ */
+void publish()
+{
+  client.publish(out_topic, out_message);
   Serial.print("Message sent [");
-  Serial.print(topic);
+  Serial.print(out_topic);
   Serial.print("]: ");
-  Serial.println(message);
+  Serial.println(out_message);
   flash_led();
   delay(500);
   flash_led();
-}
-
-/*
- *        on_reset
- *        
- *    Takes and sends an imediate reading. 
- *    Starts taking scheduled readings.
- */
-void on_reset(int id)
-{
-  if (id != last_reset_id){
-    Data data = acquire_data();
-    send_message(STAMPED, data);
-    taking_readings = true;
-    last_reset_id = id;
+  
+  if (stamped_mode) {
+    data_ack = false;
+    retry_timer = millis();
+  } else if (sleep_mode) {
+    sleep();
   }
 }
 
 /*
- *        on_ack
+ *        send reading
  *        
- *    Stops re-sending messages.
- *    Sleeps if in sleep mode.
+ *    aquire data.
+ *    copy to buffer with stamp if required.
+ *    publish message.   
+ *    
  */
-void on_ack(ackType ack_type)
+void send_reading()
 {
-  if (ack_type == DATA_ACK){
-    data_ack = true;
-    if (turn_off_wifi) {
-      WiFi.mode(WIFI_OFF);
-      Serial.println("Wifi Disconnected");
-      turn_off_wifi = false;
-    }
+  acquire_data(); 
+  if (stamped_mode){
+    sprintf(
+      out_message,
+      "%d: %s",
+      message_id++,
+      reading
+    );
+  } else {
+    strcpy(out_message, reading);
   }
-  else if (ack_type = REG_ACK){
-    reg_ack = true;
-  }
+  publish();
+  poll_timer = millis();
 }
-
-/*
- *        on_unstamped_poll
- *        
- *    Takes reading and sends data.
- */
-void on_unstamped_poll()
-{
-  Data data = acquire_data();
-  send_message(UNSTAMPED, data);
-}
-
-/*        
- *         on_stamped_poll
- *     
- *     Takes reading and sends data.
- *     Sets up sleep period if requested.
- */
-void on_stamped_poll(long sleep_sec)
-{
-  Data data = acquire_data();
-  send_message(STAMPED, data);
-  if (sleep_sec){
-    turn_off_wifi = true;      
-    sleep_period = sleep_sec * 1000;
-    Serial.print("Turning off for ");
-    Serial.print(sleep_sec);
-    Serial.println(" seconds after ack");
-    sleep_timer = millis(); 
-  }
-}
-
-/*
- *        on_standby
- *        
- *    Sends acknoledgement.    
- *    stops taking readings.
- */
- void on_standby()
- {
-  send_message(ACK);
-  taking_readings = false;
- }
-
 
 /*
  *        callback
@@ -406,34 +350,27 @@ void callback(char* topic, byte* payload, unsigned int length)
   Serial.print("Message received [");
   Serial.print(topic);
   Serial.print("]: ");
-  String message("");
-  for (int i = 0; i < length; i++) {
-    message += (char)payload[i];
-  }
-  Serial.println(message);
+  Serial.println((char *)payload);
   
-  if (message.startsWith("R") && !demand_mode){
-    message.remove(1, 0);
-    on_reset(message.toInt());
-  }
-  else if (message.startsWith("ack")){
-    message.remove(0, 4);
-    if (message == "data"){
-      on_ack(DATA_ACK);
+  switch (payload[0]){
+    case 'P': case 'p':{
+      send_reading();
+      break;
     }
-    else if (message == "reg"){
-      on_ack(REG_ACK);
+    case 'R': case 'r':{
+      send_reading();
+      taking_readings = true;
+      break;
     }
-  }
-  else if (message == "POLL"){
-    on_unstamped_poll();
-  }
-  else if (message.startsWith("P")){
-    message.remove(0, 1);
-    on_stamped_poll(message.toInt());
-  }
-  else if (message == "standby"){
-    on_standby();
+    default:{
+      if (atoi((char *)payload) == message_id){
+        data_ack = true;
+        if (sleep_mode) {
+          sleep();
+        }
+      }
+      break;
+    }
   }
 }
 
@@ -447,72 +384,86 @@ void setup()
 {
   Serial.begin(115200);
   pinMode(LED, OUTPUT);
+  digitalWrite(LED, LOW);
   Wire.begin();
   
-  // Setup wifi:
+  // read config:
   if (!load_config()){
-    Serial.println("Config file error. exiting");
+    Serial.println("Config file error. Exiting");
     while(1){
       delay(1000);
     }
   }
   Serial.println(""); 
-  Serial.print("Sensor location: ");
-  Serial.println(location);
+  Serial.print("Sensor: ");
+  Serial.println(name);
   
-  digitalWrite(LED, HIGH);
-  
+  // setup wifi:
   connect_to_wifi();
   Serial.print("Connected to ");
   Serial.println(ssid);
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
   
-  // Setup ota:
-  ArduinoOTA.onStart(on_ota_start);
-  ArduinoOTA.begin();
+  // setup ota:
+  //ArduinoOTA.onStart(on_ota_start);
+  //ArduinoOTA.begin();
 
-  // Setup mqtt:
-  client.setServer(mqtt_server, 1883);
+  // setup mqtt:
+  client.setServer(mqtt_server, MQTT_PORT);
   client.setCallback(callback);
+  connect_to_mqtt();
+  Serial.print("Connected to ");
+  Serial.println(mqtt_server);
+  
+
+  
+  // initial status:
+  Serial.print("demand mode: ");
+  Serial.println(demand_mode ? "on" : "off");
+  Serial.print("stamped mode: ");
+  Serial.println(stamped_mode ? "on" : "off");
+  Serial.print("sleep mode: ");
+  Serial.println(sleep_mode ? "on" : "off");
+  Serial.print("wait mode: ");
+  Serial.println(wait_mode ? "on" : "off");
+  taking_readings = !wait_mode;
+  data_ack = true;
+  message_id = 0;
+  if (taking_readings){
+    send_reading();
+  }
 }
 
 /*
  *        loop
  *        
  *    Main loop.
+ * 
+ *    Checks if readings need to be sent.
  *    
  */
 void loop() 
-{
-  // reconect wifi after timer:
-  if (WiFi.status() == WL_DISCONNECTED && 
-      (unsigned long)(millis() - sleep_timer) >= sleep_period){
-    connect_to_wifi();
-    sleep_period = 0;      
-  }
-  
-  // reconect mqtt:
-  if (WiFi.status() == WL_CONNECTED && !client.connected()) {
-    connect_to_mqtt(); 
+{  
+  // send data every poll_period mS if nessesary:
+  if (taking_readings && (unsigned long)(millis() - poll_timer) >= poll_period){
+    // connect to wifi if sleeping:
+    if (WiFi.status() == WL_DISCONNECTED){
+      connect_to_wifi();
+    }
+    // connect to mqtt if disconnected:
+    if (!client.connected()) {
+      connect_to_mqtt(); 
+    }
+    send_reading();
   }
 
-  // send / re-send register message until acknowledgement:
-  if (!demand_mode && !reg_ack && ((unsigned long)(millis() - ack_timer) >= ack_timeout)){
-    send_message(REG);
-  }
   // re-send data until acknowledgement:
-  else if (!data_ack && ((unsigned long)(millis() - ack_timer) >= ack_timeout)){
-    send_message(RETRY);
-  }
-  // send data every poll_period mS if nessesary: 
-  else if (taking_readings && (unsigned long)(millis() - poll_timer) >= poll_period){
-    Data data = acquire_data();
-    send_message(STAMPED, data);
-    turn_off_wifi = sleep_mode ? true : false;
+  else if (!data_ack && ((unsigned long)(millis() - retry_timer) >= retry_period)){
+    publish();
   }
 
   client.loop();
-  ArduinoOTA.handle();
-  delay(1000);
+  //ArduinoOTA.handle();
+  delay(100);
 }

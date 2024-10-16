@@ -1,8 +1,11 @@
 {
-  "ssid": "motorola",
-  "password": "pwordpword",
-  "mqtt server": "192.168.43.130",
-  "location": "location1",
+  "ssid": "Pixel_3237",
+  "password": "********",
+  "mqtt server": "192.168.73.78",
+  "name": "back",
   "poll period": 600,
-  "ack timeout": 10000
+  "sleep mode": 0,
+  "stamped mode": 0,
+  "wait mode": 0,
+  "retry period": 20
 }
